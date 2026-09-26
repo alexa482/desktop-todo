@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "sections": {
+    "General": [],
+    "Human-Robotic Interaction": [
+      {
+        "text": "Task 1",
+        "completed": true,
+        "subtasks": []
+      }
+    ],
+    "VR/AR": []
+  },
+  "selected_section": "Human-Robotic Interaction"
+}
