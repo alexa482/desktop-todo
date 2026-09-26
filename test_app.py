@@ -32,6 +32,93 @@ class TaskTests(unittest.TestCase):
                 self.assertEqual(target.read_text(), 'existing user data')
                 self.assertEqual(seed.read_bytes(), original)
 
+    def test_rename_preserves_nested_tasks_order_counts_and_persistence(self):
+        self.model.add_section('HRI')
+        main = self.model.add_task('Assignment')
+        child = self.model.add_task('Build', parent=main)
+        leaf = self.model.add_task('Test', parent=child)
+        self.model.complete(leaf)
+        tasks = self.model.tasks
+        self.model.add_section('Spanish')
+        self.model.data['selected_section'] = 'HRI'
+        self.assertTrue(self.model.rename_section('HRI', '  Robotics  '))
+        self.assertIs(self.model.data['sections']['Robotics'], tasks)
+        self.assertTrue(tasks[0]['subtasks'][0]['subtasks'][0]['completed'])
+        self.assertEqual(self.model.data['section_order'], ['General', 'Robotics', 'Spanish'])
+        self.assertEqual(self.model.data['selected_section'], 'Robotics')
+        self.assertEqual(self.model.incomplete_count('Robotics'), 1)
+        self.model.rename_section('Spanish', 'Language')
+        self.assertEqual(self.model.data['selected_section'], 'Robotics')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'tasks.json'
+            write_data(path, self.model.data)
+            self.assertEqual(load_data(path), self.model.data)
+
+    def test_invalid_rename_is_atomic_and_case_only_rename_allowed(self):
+        import copy
+        self.model.add_section('HRI')
+        before = copy.deepcopy(self.model.data)
+        for name in ('', '   ', 'general', ' General '):
+            with self.assertRaises(ValueError):
+                self.model.rename_section('HRI', name)
+            self.assertEqual(self.model.data, before)
+        self.assertFalse(self.model.rename_section('HRI', ' HRI '))
+        self.assertTrue(self.model.rename_section('HRI', 'hri'))
+
+    def test_inline_rename_escape_cancel_and_commit(self):
+        app = TodoApp.__new__(TodoApp)
+        app.model = self.model
+        app.section_edit_name = 'General'
+        app.section_editor = Mock()
+        editor = app.section_editor
+        editor.get.return_value = 'Changed'
+        app.root = Mock()
+        app.refresh_sections = Mock()
+        app.heading = Mock()
+        app.save_tasks = Mock()
+        app.finish_section_rename(cancel=True)
+        self.assertEqual(self.model.data['selected_section'], 'General')
+        editor.destroy.assert_called_once()
+        app.save_tasks.assert_not_called()
+        self.assertIsNone(app.section_editor)
+        app.section_editor = Mock()
+        app.section_editor.get.return_value = '  Personal  '
+        app.finish_section_rename()
+        self.assertEqual(self.model.data['selected_section'], 'Personal')
+        app.heading.configure.assert_called_once_with(text='Personal')
+        app.save_tasks.assert_called_once()
+        app.finish_section_rename()  # Reentrant focus-out is harmless.
+        app.save_tasks.assert_called_once()
+
+    def test_double_click_creates_selected_editor_and_cancels_drag(self):
+        import app as module
+        from types import SimpleNamespace
+        app = TodoApp.__new__(TodoApp)
+        app.section_list = Mock()
+        app.section_list.identify_row.return_value = 'a'
+        app.section_list.identify_column.return_value = '#0'
+        app.section_list.bbox.return_value = (0, 0, 160, 30)
+        app.section_names = {'a': 'General'}
+        app.section_editor = None
+        app.section_drag = {'row': 'a', 'active': False}
+        with patch.object(module.ttk, 'Entry') as entry:
+            editor = entry.return_value
+            self.assertEqual(app.begin_section_rename(SimpleNamespace(x=10, y=10)), 'break')
+            editor.insert.assert_called_once_with(0, 'General')
+            editor.selection_range.assert_called_once_with(0, module.tk.END)
+            editor.focus_set.assert_called_once()
+            bindings = {call.args[0]: call.args[1] for call in editor.bind.call_args_list}
+            self.assertEqual(set(bindings), {'<Return>', '<Escape>', '<FocusOut>'})
+            self.assertIsNone(app.section_drag)
+            app.finish_section_rename = Mock()
+            bindings['<Escape>'](None)
+            app.finish_section_rename.assert_called_once_with(cancel=True)
+            app.finish_section_rename.reset_mock()
+            app.section_editor_outside_click(SimpleNamespace(widget=editor))
+            app.finish_section_rename.assert_not_called()
+            app.section_editor_outside_click(SimpleNamespace(widget=Mock()))
+            app.finish_section_rename.assert_called_once()
+
     def test_section_order_migration_repair_and_new_sections(self):
         legacy = {'sections': {'General': [], 'HRI': [], 'VR/AR': []}}
         data = normalize_data(legacy)

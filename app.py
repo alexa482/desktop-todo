@@ -95,6 +95,7 @@ def configure_typography(root):
         ("SectionHeading.TLabel", "TLabel", "section_headings"),
         ("Tasks.Treeview", "Treeview", "task_text"),
         ("Task.TEntry", "TEntry", "task_text"),
+        ("Section.Task.TEntry", "Task.TEntry", "section_text"),
         ("Sidebar.Treeview", "Treeview", "section_text"),
         ("Small.TButton", "TButton", "small_sidebar"),
     ):
@@ -454,6 +455,28 @@ class TaskModel:
             raise ValueError('Section order must contain every section exactly once.')
         self.data['section_order'] = list(order)
 
+    def rename_section(self, old_name, new_name):
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError('Please enter a section name.')
+        sections = self.data['sections']
+        if old_name not in sections:
+            raise ValueError('That section no longer exists.')
+        if any(name != old_name and name.casefold() == new_name.casefold() for name in sections):
+            raise ValueError('That section already exists.')
+        if new_name == old_name:
+            return False
+        # Preserve the task objects and update every stored name reference together.
+        self.data['sections'] = {
+            new_name if name == old_name else name: tasks for name, tasks in sections.items()
+        }
+        self.data['section_order'] = [
+            new_name if name == old_name else name for name in self.data['section_order']
+        ]
+        if self.data['selected_section'] == old_name:
+            self.data['selected_section'] = new_name
+        return True
+
     def add_task(self, text, parent=None):
         text = text.strip()
         if not text:
@@ -550,9 +573,12 @@ class TodoApp:
         self.section_list.configure(yscrollcommand=self.section_scroll.set)
         self.section_list.bind("<<TreeviewSelect>>", self.select_section)
         self.section_drag = None
+        self.section_editor = None
         self.section_list.bind('<ButtonPress-1>', self.section_drag_start)
         self.section_list.bind('<B1-Motion>', self.section_drag_motion)
         self.section_list.bind('<ButtonRelease-1>', self.section_drag_end)
+        self.section_list.bind('<Double-Button-1>', self.begin_section_rename)
+        root.bind('<ButtonPress-1>', self.section_editor_outside_click, add='+')
         self.new_section_button = ttk.Button(root, style="Small.TButton", text="+ New Section", command=self.new_section)
         self.task_entry = ttk.Entry(root, style="Task.TEntry")
         self.add_button = ttk.Button(root, style="Small.TButton", text="Add", command=self.add_task)
@@ -632,6 +658,8 @@ class TodoApp:
             self.message_timer = self.root.after(QUOTE_DURATION_MS, self.rotate_message)
 
     def close(self):
+        if getattr(self, 'section_editor', None) is not None:
+            self.finish_section_rename()
         self.root.after_cancel(self.message_timer)
         self.background.close()
         self.root.destroy()
@@ -654,11 +682,15 @@ class TodoApp:
                 self.section_list.see(row)
 
     def section_drag_start(self, event):
+        if getattr(self, 'section_editor', None) is not None:
+            self.finish_section_rename()
         row = self.section_list.identify_row(event.y)
         self.section_drag = {'row': row, 'y': event.y, 'active': False} if row else None
         # Let Treeview's normal click handling select and switch the section.
 
     def section_drag_motion(self, event):
+        if getattr(self, 'section_editor', None) is not None:
+            return 'break'
         drag = self.section_drag
         if drag is None:
             return
@@ -691,6 +723,54 @@ class TodoApp:
                 self.model.reorder_sections(order)
                 self.save_tasks()
             return 'break'
+
+    def begin_section_rename(self, event):
+        self.section_drag = None  # A double-click must never become a drag.
+        tree = self.section_list
+        row = tree.identify_row(event.y)
+        if not row or tree.identify_column(event.x) != '#0':
+            return 'break'
+        if self.section_editor is not None:
+            self.finish_section_rename()
+        box = tree.bbox(row, '#0')
+        if not box:
+            return 'break'
+        self.section_edit_name = self.section_names[row]
+        editor = ttk.Entry(tree, style='Section.Task.TEntry')
+        self.section_editor = editor
+        editor.insert(0, self.section_edit_name)
+        x, y, width, height = box
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.selection_range(0, tk.END)
+        editor.focus_set()
+        editor.bind('<Return>', self.finish_section_rename)
+        editor.bind('<Escape>', lambda event: self.finish_section_rename(cancel=True))
+        editor.bind('<FocusOut>', self.finish_section_rename)
+        return 'break'
+
+    def section_editor_outside_click(self, event):
+        editor = self.section_editor
+        if editor is not None and event.widget is not editor:
+            self.finish_section_rename()
+
+    def finish_section_rename(self, event=None, cancel=False):
+        editor = self.section_editor
+        if editor is None:
+            return 'break'
+        name = editor.get()
+        self.section_editor = None  # Guard against FocusOut during destruction.
+        editor.destroy()
+        if not cancel:
+            try:
+                changed = self.model.rename_section(self.section_edit_name, name)
+            except ValueError:
+                self.root.bell()  # Invalid edits leave the original data untouched.
+            else:
+                if changed:
+                    self.refresh_sections()
+                    self.heading.configure(text=self.model.data['selected_section'])
+                    self.save_tasks()
+        return 'break'
 
     def select_section(self, event=None):
         selected = self.section_list.selection()
